@@ -47,38 +47,23 @@ class EHRConnector(BaseDataConnector):
         end_date: datetime,
         **kwargs
     ) -> Dict[str, Any]:
-        """Retrieve EHR data for the specified patient and time range."""
+        """Get EHR data for the specified patient and time range."""
         try:
-            if not self._session:
-                self._session = aiohttp.ClientSession()
+            # Get data from EHR system
+            data = await self._get_ehr_data(patient_id, start_date, end_date)
             
-            # Initialize FHIR client if needed
-            if not self._fhir_client:
-                self._fhir_client = self._initialize_fhir_client()
-            
-            # Get various types of EHR data
-            data = {
-                "medications": await self._get_medications(patient_id, start_date, end_date),
-                "diagnoses": await self._get_diagnoses(patient_id, start_date, end_date),
-                "lab_results": await self._get_lab_results(patient_id, start_date, end_date),
-                "vitals": await self._get_vitals(patient_id, start_date, end_date),
-                "clinical_notes": await self._get_clinical_notes(patient_id, start_date, end_date)
-            }
-            
-            # Validate and preprocess data
-            if await self.validate_data(data):
-                data = await self.preprocess_data(data)
-                return data
+            # Validate data
+            if self.validate_data(data):  # Removed await
+                # Preprocess data
+                processed_data = await self.preprocess_data(data)
+                return processed_data
             else:
-                raise ValueError("Invalid EHR data")
+                logger.error("Invalid EHR data")
+                return {}
             
         except Exception as e:
             logger.error(f"Error getting EHR data: {str(e)}")
-            raise
-        finally:
-            if self._session:
-                await self._session.close()
-                self._session = None
+            return {}
     
     def _initialize_fhir_client(self) -> client.FHIRClient:
         """Initialize FHIR client."""

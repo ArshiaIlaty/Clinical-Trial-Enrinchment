@@ -63,16 +63,18 @@ class WearableDataConnector(BaseDataConnector):
             else:
                 raise ValueError(f"Unsupported device type: {device_type}")
             
-            # Validate and preprocess data
-            if await self.validate_data(data):
-                data = await self.preprocess_data(data)
-                return data
+            # Validate data
+            if self.validate_data(data):
+                # Preprocess data
+                processed_data = await self.preprocess_data(data)
+                return processed_data
             else:
-                raise ValueError("Invalid wearable data")
+                logger.error("Invalid wearable data")
+                return {}
             
         except Exception as e:
             logger.error(f"Error getting wearable data: {str(e)}")
-            raise
+            return {}
         finally:
             if self._session:
                 await self._session.close()

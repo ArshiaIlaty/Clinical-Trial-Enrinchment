@@ -52,7 +52,7 @@ class SurveyConnector(BaseDataConnector):
         survey_type: str = "adherence",
         **kwargs
     ) -> Dict[str, Any]:
-        """Retrieve survey data for the specified patient and time range."""
+        """Get survey data for the specified patient and time range."""
         try:
             if not self._session:
                 self._session = aiohttp.ClientSession()
@@ -68,16 +68,18 @@ class SurveyConnector(BaseDataConnector):
                 self.survey_types[survey_type]
             )
             
-            # Validate and preprocess data
-            if await self.validate_data(data):
-                data = await self.preprocess_data(data)
-                return data
+            # Validate data
+            if self.validate_data(data):
+                # Preprocess data
+                processed_data = await self.preprocess_data(data)
+                return processed_data
             else:
-                raise ValueError("Invalid survey data")
+                logger.error("Invalid survey data")
+                return {}
             
         except Exception as e:
             logger.error(f"Error getting survey data: {str(e)}")
-            raise
+            return {}
         finally:
             if self._session:
                 await self._session.close()

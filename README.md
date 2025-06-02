@@ -68,10 +68,6 @@ python -m agents.main
 - Sort imports: `isort .`
 - Run tests: `pytest`
 
-## License
-
-MIT License
-
 ## Contributing
 
 Please read CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests. 

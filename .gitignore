@@ -375,3 +375,17 @@ docker-compose.yaml
 # Local development
 .local/
 local/
+
+*.png
+*.svg
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.heic
+*.heif
+*.zip
+*.tex

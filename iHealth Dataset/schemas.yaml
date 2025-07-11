@@ -1,0 +1,103 @@
+# all IDs have been hashed
+# all dates have been shifted
+
+demographics:
+    demographics:
+      fields:
+        - hashed_patient_id
+        - gender_at_birth
+        - gender_identity
+        - height_cm
+        - weight_kg
+        - body_weight_bmi
+        - body_weight_bmi_category
+        - race
+        - age_group
+        - first_enrolled_date
+        - discharged_date
+        - assigned_treatment
+            Only Including patients with BG / BP treatment.
+            Pre-diabetic patients are assigned with BP treatment.
+
+    lifestyle:
+      fields:
+        - hashed_patient_id
+        - is_smoker
+        - quit_smoking_year
+        - is_drinker
+        - drinking_frequency
+        - drinking_quantity
+        - quit_drinking_year
+        - physical_activity_frequency
+        - physical_activity_level
+        - physical_activity_duration
+
+    health_conditions:
+      fields:
+        - hashed_patient_id
+        - icd_codes
+        - diagnosis
+
+
+measurements:
+    blood_pressure:
+      fields:
+        - hashed_patient_id
+        - measurement_ts
+        - had_bp_medicine
+        - systolic_blood_pressure
+        - systolic_unit
+        - diastolic_blood_pressure
+        - diastolic_unit
+    blood_glucose:
+      fields:
+        - hashed_patient_id
+        - measurement_ts
+        - had_bg_medicine
+        - had_insulin
+        - had_activity
+        - meal_type
+        - blood_glucose
+        - blood_glucose_unit
+    weight:
+      fields:
+        - hashed_patient_id
+        - measurement_ts
+        - body_weight_value
+        - body_weight_change_value
+            We use daily average values to calculate body_weight_change_value.  
+            except for the first measurement of the day—
+            in this case, we subtract it from the previous day's average value.
+        - body_weight_unit
+    A1C:
+      fields:
+        - hashed_patient_id
+        - collected_date
+        - a1c_value
+        - a1c_unit
+
+
+
+care work:
+  food_logs:
+    fields:
+      - hashed_patient_id
+      - collected_ts
+      - meal_type
+      - rating
+      - is_reviewed
+
+  visits:
+    fields:
+      - hashed_patient_id
+      - visit_type
+      - visit_mode
+      - checked_in_ts
+      - checked_out_ts
+        If checked_out_ts is null then this patient was a no-show
+
+  chat_summary:
+    fields:
+      - hashed_patient_id
+      - message_date
+      - chat_count

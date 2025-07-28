@@ -37,6 +37,8 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+*.txt
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -389,3 +391,5 @@ local/
 *.heif
 *.zip
 *.tex
+.cursorindexingignore
+.specstory/history/2025-07-28_06-16Z-recovering-lost-script-information.md

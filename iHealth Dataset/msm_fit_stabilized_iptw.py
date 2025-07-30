@@ -1,108 +1,193 @@
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 import statsmodels.api as sm
 from statsmodels.genmod.generalized_estimating_equations import GEE
 from statsmodels.genmod.families import Gaussian
 from statsmodels.genmod.cov_struct import Exchangeable
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.stats.diagnostic import het_breuschpagan
 
 # Load long-format panel data (weeks 1-52 only)
 df = pd.read_csv('msm_long_panel_with_propensity.csv')
 df = df[(df['WEEK'] >= 1) & (df['WEEK'] <= 52)]
 
-# Drop rows with missing required data
-df = df.dropna(subset=['adherence','GENDER_AT_BIRTH_M','ASSIGNED_TREATMENT_BP','BMI','mean_bp'])
+# Focus on patients with BP measurements (address data quality issue)
+df = df[df['n_bp'] > 0].copy()
 
-# Standardize BMI
+# Drop rows with missing required data
+df = df.dropna(subset=['ADHERENCE_SCORE','GENDER_AT_BIRTH_M','ASSIGNED_TREATMENT_BP','BMI','mean_bp'])
+# Reset index to ensure contiguous indices for GEE model
+df = df.reset_index(drop=True)
+
+print(f"=== DATA QUALITY SUMMARY ===")
+print(f"Total observations after filtering: {len(df)}")
+print(f"Unique patients: {df['HASHED_PATIENT_ID'].nunique()}")
+print(f"Weeks range: {df['WEEK'].min()} to {df['WEEK'].max()}")
+print(f"Mean BP range: {df['mean_bp'].min():.1f} to {df['mean_bp'].max():.1f} mmHg")
+print(f"Adherence score range: {df['ADHERENCE_SCORE'].min():.3f} to {df['ADHERENCE_SCORE'].max():.3f}")
+
+# Standardize continuous variables
 scaler = StandardScaler()
-BMI_scaled = scaler.fit_transform(df[['BMI']])
-df['BMI_SCALED'] = BMI_scaled.flatten()
+df[['BMI_SCALED', 'ADHERENCE_SCORE_SCALED']] = scaler.fit_transform(df[['BMI', 'ADHERENCE_SCORE']])
 
 # ---
-# For each week, fit propensity models only if both classes are present
-# If only one class (all 0 or all 1), set stabilized_weight=1 for that week
+# Time Series Diagnostics
+print(f"\n=== TIME SERIES DIAGNOSTICS ===")
 
-def assign_weights_per_week(df):
+# Check for stationarity in BP over time
+bp_by_week = df.groupby('WEEK')['mean_bp'].mean()
+adf_result = adfuller(bp_by_week.dropna())
+print(f"BP stationarity test (ADF): p-value = {adf_result[1]:.4f}")
+print(f"BP is {'stationary' if adf_result[1] < 0.05 else 'non-stationary'}")
+
+# Check for autocorrelation in residuals (will do after model fitting)
+print(f"Mean BP by week trend: {bp_by_week.mean():.1f} mmHg")
+
+# ---
+# Modified IPTW for continuous adherence score
+def assign_weights_continuous(df):
     df = df.copy()
     df['stabilized_weight'] = np.nan
+    
     for week, sub in df.groupby('WEEK'):
-        if sub['adherence'].nunique() == 1:
-            # Only one class, set weight=1
+        if len(sub) < 10:  # Too few observations for reliable modeling
             df.loc[sub.index, 'stabilized_weight'] = 1.0
         else:
-            # Fit numerator model: P(adherence | baseline covariates)
+            # Numerator model: P(adherence_score | baseline covariates)
             X_num = sub[['GENDER_AT_BIRTH_M','ASSIGNED_TREATMENT_BP','BMI_SCALED']]
-            y = sub['adherence']
-            ps_num = LogisticRegression(max_iter=1000)
+            y = sub['ADHERENCE_SCORE_SCALED']
+            
+            # Use linear regression for continuous outcome
+            ps_num = LinearRegression()
             ps_num.fit(X_num, y)
-            ps_num_pred = ps_num.predict_proba(X_num)[:,1]
-            # Fit denominator model: P(adherence | baseline covariates + prev_adherence)
+            ps_num_pred = ps_num.predict(X_num)
+            
+            # Denominator model: P(adherence_score | baseline covariates + prev_adherence)
             X_den = X_num.copy()
-            X_den['prev_adherence'] = sub['prev_adherence']
-            ps_den = LogisticRegression(max_iter=1000)
+            X_den['prev_adherence_score'] = sub['prev_adherence']
+            
+            ps_den = LinearRegression()
             ps_den.fit(X_den, y)
-            ps_den_pred = ps_den.predict_proba(X_den)[:,1]
-            # Calculate stabilized weights
-            weights = ps_num_pred / ps_den_pred
-            weights = np.clip(weights, 0, 10)
+            ps_den_pred = ps_den.predict(X_den)
+            
+            # Calculate stabilized weights (avoid division by zero)
+            weights = np.where(ps_den_pred != 0, ps_num_pred / ps_den_pred, 1.0)
+            weights = np.clip(weights, 0.1, 10)  # Trim extreme weights
             df.loc[sub.index, 'stabilized_weight'] = weights
+    
     return df
 
-# Diagnostic: write adherence class counts per week to a file
-with open('msm_adherence_by_week_debug.txt', 'w') as f:
-    for week, sub in df.groupby('WEEK'):
-        f.write(f'Week {week}: {sub["adherence"].value_counts().to_dict()}\n')
+df = assign_weights_continuous(df)
 
-df = assign_weights_per_week(df)
-
-print('Stabilized IPTW weights calculated. Mean:', df['stabilized_weight'].mean(), 'Std:', df['stabilized_weight'].std())
+print(f"\nStabilized IPTW weights calculated. Mean: {df['stabilized_weight'].mean():.3f}, Std: {df['stabilized_weight'].std():.3f}")
 
 # ---
-# 4. MSM: Estimate effect of adherence on BP (mean_bp) using GEE with stabilized weights
-#   - Outcome: mean_bp (per week)
-#   - Exposure: adherence (per week)
-#   - Cluster: patient
-#   - Weights: stabilized IPTW
+# Multiple Analysis Approaches
 
+# 1. GEE with time-varying adherence score
+print(f"\n=== ANALYSIS 1: GEE WITH CONTINUOUS ADHERENCE SCORE ===")
 df = df.sort_values(['HASHED_PATIENT_ID','WEEK'])
 
-# MSM formula: mean_bp ~ adherence
-model = GEE(
+model_gee = GEE(
     endog=df['mean_bp'],
-    exog=sm.add_constant(df['adherence']),
+    exog=sm.add_constant(df[['ADHERENCE_SCORE_SCALED']]),
     groups=df['HASHED_PATIENT_ID'],
     family=Gaussian(),
     cov_struct=Exchangeable(),
     weights=df['stabilized_weight']
 )
-result = model.fit()
+result_gee = model_gee.fit()
 
-print('\n=== MSM (GEE) Weighted Regression Results ===')
-print(result.summary())
-print(f'Estimated effect of adherence on mean BP (per week): {result.params["adherence"]:.2f} mmHg')
+print(result_gee.summary())
+print(f"Estimated effect of adherence score on mean BP: {result_gee.params['ADHERENCE_SCORE_SCALED']:.2f} mmHg per SD increase")
 
-# Save results
-df[['HASHED_PATIENT_ID','WEEK','adherence','mean_bp','stabilized_weight']].to_csv('msm_panel_with_stabilized_weights.csv', index=False)
-with open('msm_gee_results.txt','w') as f:
-    f.write(result.summary().as_text())
-    f.write(f'\nEstimated effect of adherence on mean BP (per week): {result.params["adherence"]:.2f} mmHg\n')
+# 2. Time series aware analysis with lagged effects
+print(f"\n=== ANALYSIS 2: TIME SERIES WITH LAGGED EFFECTS ===")
 
-print('\nFiles saved:')
-print('- msm_panel_with_stabilized_weights.csv')
-print('- msm_gee_results.txt')
+# Add lagged adherence score
+df['adherence_score_lag1'] = df.groupby('HASHED_PATIENT_ID')['ADHERENCE_SCORE_SCALED'].shift(1).fillna(0)
+
+model_lagged = GEE(
+    endog=df['mean_bp'],
+    exog=sm.add_constant(df[['ADHERENCE_SCORE_SCALED', 'adherence_score_lag1']]),
+    groups=df['HASHED_PATIENT_ID'],
+    family=Gaussian(),
+    cov_struct=Exchangeable(),
+    weights=df['stabilized_weight']
+)
+result_lagged = model_lagged.fit()
+
+print(result_lagged.summary())
+print(f"Current adherence effect: {result_lagged.params['ADHERENCE_SCORE_SCALED']:.2f} mmHg per SD")
+print(f"Lagged adherence effect: {result_lagged.params['adherence_score_lag1']:.2f} mmHg per SD")
+
+# 3. Quintile-based analysis for robustness
+print(f"\n=== ANALYSIS 3: QUINTILE-BASED ANALYSIS ===")
+
+# Create adherence quintiles
+df['adherence_quintile_scaled'] = pd.qcut(df['ADHERENCE_SCORE'], q=5, labels=[1,2,3,4,5], duplicates='drop')
+df['adherence_quintile_scaled'] = df['adherence_quintile_scaled'].astype(float)
+
+model_quintile = GEE(
+    endog=df['mean_bp'],
+    exog=sm.add_constant(df[['adherence_quintile_scaled']]),
+    groups=df['HASHED_PATIENT_ID'],
+    family=Gaussian(),
+    cov_struct=Exchangeable(),
+    weights=df['stabilized_weight']
+)
+result_quintile = model_quintile.fit()
+
+print(result_quintile.summary())
+print(f"Effect per quintile increase: {result_quintile.params['adherence_quintile_scaled']:.2f} mmHg")
+
+# ---
+# Model Diagnostics
+print(f"\n=== MODEL DIAGNOSTICS ===")
+
+# Residual analysis
+residuals = result_gee.resid
+print(f"Residual mean: {residuals.mean():.3f}")
+print(f"Residual std: {residuals.std():.3f}")
+
+# Heteroscedasticity test
+bp_test = het_breuschpagan(residuals, result_gee.model.exog)
+print(f"Heteroscedasticity test (Breusch-Pagan): p-value = {bp_test[1]:.4f}")
+
+# Save comprehensive results
+df[['HASHED_PATIENT_ID','WEEK','ADHERENCE_SCORE','mean_bp','stabilized_weight','adherence_quintile_scaled']].to_csv('msm_panel_continuous_analysis.csv', index=False)
+
+with open('msm_continuous_analysis_results.txt','w') as f:
+    f.write("=== CONTINUOUS ADHERENCE SCORE MSM ANALYSIS ===\n\n")
+    f.write("1. GEE WITH CONTINUOUS ADHERENCE SCORE:\n")
+    f.write(result_gee.summary().as_text())
+    f.write(f"\nEstimated effect: {result_gee.params['ADHERENCE_SCORE_SCALED']:.2f} mmHg per SD increase\n\n")
+    
+    f.write("2. TIME SERIES WITH LAGGED EFFECTS:\n")
+    f.write(result_lagged.summary().as_text())
+    f.write(f"\nCurrent effect: {result_lagged.params['ADHERENCE_SCORE_SCALED']:.2f} mmHg per SD\n")
+    f.write(f"Lagged effect: {result_lagged.params['adherence_score_lag1']:.2f} mmHg per SD\n\n")
+    
+    f.write("3. QUINTILE-BASED ANALYSIS:\n")
+    f.write(result_quintile.summary().as_text())
+    f.write(f"\nEffect per quintile: {result_quintile.params['adherence_quintile_scaled']:.2f} mmHg\n\n")
+    
+    f.write("=== DIAGNOSTICS ===\n")
+    f.write(f"Residual mean: {residuals.mean():.3f}\n")
+    f.write(f"Residual std: {residuals.std():.3f}\n")
+    f.write(f"Heteroscedasticity p-value: {bp_test[1]:.4f}\n")
+    f.write(f"BP stationarity p-value: {adf_result[1]:.4f}\n")
+
+print(f"\nFiles saved:")
+print(f"- msm_panel_continuous_analysis.csv")
+print(f"- msm_continuous_analysis_results.txt")
 
 # ---
 # Notes:
-# - For weeks with only one adherence class, stabilized_weight=1
-# - For other weeks, weights are estimated as usual
-# - Numerator: P(adherence | gender, BMI, treatment)
-# - Denominator: P(adherence | gender, BMI, treatment, previous adherence)
-# - Outcome: mean BP per week
-# - Exposure: adherence per week
-# - Model: GEE (accounts for repeated measures per patient) 
-
-# Diagnostic: write adherence class counts per week to a file
-with open('msm_adherence_by_week_debug.txt', 'w') as f:
-    for week, sub in df.groupby('WEEK'):
-        f.write(f'Week {week}: {sub["adherence"].value_counts().to_dict()}\n') 
+# - Uses continuous ADHERENCE_SCORE instead of binary adherence
+# - Addresses data quality by focusing on patients with BP measurements
+# - Includes time series diagnostics and lagged effects
+# - Provides multiple analysis approaches for robustness
+# - Includes model diagnostics for validity assessment 
